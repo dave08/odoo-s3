@@ -24,7 +24,9 @@
 
 from openerp.osv import osv
 
-import boto
+from minio import Minio
+from minio.error import ResponseError
+
 import base64
 import hashlib
 
@@ -33,6 +35,8 @@ class S3Attachment(osv.osv):
     """Extends ir.attachment to implement the S3 storage engine
     """
     _inherit = "ir.attachment"
+
+    _bucket_name = ""
 
     def _connect_to_S3_bucket(self, bucket_url):
         # Parse the bucket url
@@ -45,7 +49,10 @@ class S3Attachment(osv.osv):
             access_key_id = remain.split(':')[0]
             remain = remain.lstrip(access_key_id).lstrip(':')
             secret_key = remain.split('@')[0]
-            bucket_name = remain.split('@')[1]
+            remain = remain.split('@')[1]
+            _bucket_name = remain.split('.', 1)[0]
+            endpoint = remain.split('.', 1)[1]
+
             if not access_key_id or not secret_key:
                 raise Exception(
                     "No AWS access and secret keys were provided."
@@ -54,20 +61,24 @@ class S3Attachment(osv.osv):
         except Exception:
             raise Exception("Unable to parse the S3 bucket url.")
 
-        s3_conn = boto.connect_s3(access_key_id, secret_key)
-        s3_bucket = s3_conn.lookup(bucket_name)
+        s3 = Minio(endpoint,
+                        access_key = access_key_id,
+                        secret_key = secret_key,
+                        secure = True)
+
+        s3_bucket = s3.bucket_exists(bucket_name)
         if not s3_bucket:
             # If the bucket does not exist, create a new one
-            s3_bucket = s3_conn.create_bucket(bucket_name)
+            s3_bucket = s3.make_bucket(bucket_name)
 
-        return s3_bucket
+        return s3
 
     def _file_read(self, cr, uid, fname, bin_size=False):
         storage = self._storage(cr, uid)
         if storage[:5] == 's3://':
-            s3_bucket = self._connect_to_S3_bucket(storage)
-            s3_key = s3_bucket.get_key(fname)
-            if not s3_key:
+            s3 = self._connect_to_S3_bucket(storage)
+            obj = s3.get_object(_bucket_name, fname)
+            if not obj:
                 # Some old files (prior to the installation of odoo-S3) may
                 # still be stored in the file system even though
                 # ir_attachment.location is configured to use S3
@@ -77,7 +88,7 @@ class S3Attachment(osv.osv):
                     # Could not find the file in the file system either.
                     return False
             else:
-                read = base64.b64encode(s3_key.get_contents_as_string())
+                read = base64.b64encode(obj.read())
         else:
             read = super(S3Attachment, self)._file_read(cr, uid, fname, bin_size=False)
         return read
@@ -85,15 +96,11 @@ class S3Attachment(osv.osv):
     def _file_write(self, cr, uid, value, checksum):
         storage = self._storage(cr, uid)
         if storage[:5] == 's3://':
-            s3_bucket = self._connect_to_S3_bucket(storage)
+            s3 = self._connect_to_S3_bucket(storage)
             bin_value = value.decode('base64')
             fname = hashlib.sha1(bin_value).hexdigest()
 
-            s3_key = s3_bucket.get_key(fname)
-            if not s3_key:
-                s3_key = s3_bucket.new_key(fname)
-
-            s3_key.set_contents_from_string(bin_value)
+            s3.put_object(_bucket_name, fname, bin_value, bin_value.size)
         else:
             fname = super(S3Attachment, self)._file_write(
                 cr, uid, value, checksum)
