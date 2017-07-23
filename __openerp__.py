@@ -26,7 +26,7 @@
     'depends': ['base'],
 
     'external_dependencies': {
-        'python': ['boto'],
+        'python': ['minio'],
     },
 
     'installable': True
